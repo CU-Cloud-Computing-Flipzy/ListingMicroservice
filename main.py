@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException, Query, Path
+from fastapi import FastAPI, HTTPException, Query
 
 from models.category import CategoryCreate, CategoryRead, CategoryUpdate
 from models.media import MediaCreate, MediaRead, MediaUpdate
@@ -71,6 +71,20 @@ def update_category(category_id: UUID, update: CategoryUpdate):
     return categories[category_id]
 
 
+@app.delete("/categories/{category_id}", status_code=204)
+def delete_category(category_id: UUID):
+    if category_id not in categories:
+        raise HTTPException(status_code=404, detail="Category not found")
+    # Prevent deleting a category that items are using
+    in_use = any(it.category.id == category_id for it in items.values())
+    if in_use:
+        raise HTTPException(
+            status_code=400,
+            detail="Category is referenced by one or more items; delete or update those items first.",
+        )
+    del categories[category_id]
+    return None
+
 # -----------------------------------------------------------------------------
 # Media endpoints
 # -----------------------------------------------------------------------------
@@ -111,6 +125,20 @@ def update_media(media_id: UUID, update: MediaUpdate):
     media_store[media_id] = MediaRead(**stored)
     return media_store[media_id]
 
+
+@app.delete("/media/{media_id}", status_code=204)
+def delete_media(media_id: UUID):
+    if media_id not in media_store:
+        raise HTTPException(status_code=404, detail="Media not found")
+    # Prevent deleting media that any item still references
+    in_use = any(any(m.id == media_id for m in it.media) for it in items.values())
+    if in_use:
+        raise HTTPException(
+            status_code=400,
+            detail="Media is referenced by one or more items; delete or update those items first.",
+        )
+    del media_store[media_id]
+    return None
 
 # -----------------------------------------------------------------------------
 # Item endpoints
@@ -161,6 +189,13 @@ def update_item(item_id: UUID, update: ItemUpdate):
     return items[item_id]
 
 
+@app.delete("/items/{item_id}", status_code=204)
+def delete_item(item_id: UUID):
+    if item_id not in items:
+        raise HTTPException(status_code=404, detail="Item not found")
+    del items[item_id]
+    return None
+
 # -----------------------------------------------------------------------------
 # Root
 # -----------------------------------------------------------------------------
@@ -168,11 +203,9 @@ def update_item(item_id: UUID, update: ItemUpdate):
 def root():
     return {"message": "Welcome to the Catalog Items API. See /docs for OpenAPI UI."}
 
-
 # -----------------------------------------------------------------------------
 # Entrypoint
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
-
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
