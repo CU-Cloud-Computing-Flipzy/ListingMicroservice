@@ -28,11 +28,15 @@ class ItemStatus(str, Enum):
 class ItemBase(BaseModel):
     name: str = Field(
         ...,
+        min_length=1,
+        max_length=200,
         description="Name of the item.",
         json_schema_extra={"example": "Wireless Mouse"},
     )
     description: str = Field(
         ...,
+        min_length=1,
+        max_length=2000,
         description="Short description of the item.",
         json_schema_extra={"example": "Ergonomic wireless mouse with 2.4GHz USB receiver."},
     )
@@ -48,7 +52,9 @@ class ItemBase(BaseModel):
     )
     price: Decimal = Field(
         ...,
-        ge=Decimal("0"),
+        ge=Decimal("0.01"),
+        le=Decimal("999999.99"),
+        decimal_places=2,
         description="Price of the item.",
         json_schema_extra={"example": "19.99"},
     )
@@ -58,6 +64,7 @@ class ItemBase(BaseModel):
     )
     media: List[MediaRead] = Field(
         default_factory=list,
+        max_length=10,
         description="List of media (images/videos) for this item.",
     )
 
@@ -101,13 +108,13 @@ class ItemCreate(ItemBase):
 
 class ItemUpdate(BaseModel):
     """Partial update for an item."""
-    name: str | None = Field(None, description="Update name.")
-    description: str | None = Field(None, description="Update description.")
+    name: str | None = Field(None, min_length=1, max_length=200, description="Update name.")
+    description: str | None = Field(None, min_length=1, max_length=2000, description="Update description.")
     status: ItemStatus = Field(description="Status of the item.")
     condition: ItemCondition | None = Field(None, description="Update condition.")
-    price: Decimal | None = Field(None, ge=Decimal("0"), description="Update price.")
+    price: Decimal | None = Field(None, ge=Decimal("0.01"), le=Decimal("999999.99"), decimal_places=2, description="Update price.")
     category: CategoryRead | None = Field(None, description="Update category.")
-    media: List[MediaRead] | None = Field(None, description="Update media list.")
+    media: List[MediaRead] | None = Field(None, max_length=10, description="Update media list.")
 
 
 class ItemRead(ItemBase):
