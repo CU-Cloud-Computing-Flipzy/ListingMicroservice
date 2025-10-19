@@ -20,6 +20,10 @@ class ItemCondition(str, Enum):
     USED = "used"
     REFURBISHED = "refurbished"
 
+class ItemStatus(str, Enum):
+    ACTIVE = "active"
+    HIDDEN = "hidden"
+    SOLD = "sold"
 
 class ItemBase(BaseModel):
     name: str = Field(
@@ -31,6 +35,11 @@ class ItemBase(BaseModel):
         ...,
         description="Short description of the item.",
         json_schema_extra={"example": "Ergonomic wireless mouse with 2.4GHz USB receiver."},
+    )
+    status: ItemStatus = Field(
+        default=ItemStatus.ACTIVE,
+        description="Status of the item.",
+        json_schema_extra={"example": "active"},
     )
     condition: ItemCondition = Field(
         default=ItemCondition.NEW,
@@ -94,6 +103,7 @@ class ItemUpdate(BaseModel):
     """Partial update for an item."""
     name: str | None = Field(None, description="Update name.")
     description: str | None = Field(None, description="Update description.")
+    status: ItemStatus = Field(description="Status of the item.")
     condition: ItemCondition | None = Field(None, description="Update condition.")
     price: Decimal | None = Field(None, ge=Decimal("0"), description="Update price.")
     category: CategoryRead | None = Field(None, description="Update category.")

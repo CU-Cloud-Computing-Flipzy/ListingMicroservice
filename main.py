@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException, Query
 
 from models.category import CategoryCreate, CategoryRead, CategoryUpdate
 from models.media import MediaCreate, MediaRead, MediaUpdate
-from models.item import ItemCreate, ItemRead, ItemUpdate, ItemCondition
+from models.item import ItemCreate, ItemRead, ItemUpdate, ItemCondition, ItemStatus
 
 port = int(os.environ.get("FASTAPIPORT", 8000))
 
@@ -155,8 +155,18 @@ def list_items(
     q: Optional[str] = Query(None, description="Search in name or description"),
     condition: Optional[ItemCondition] = Query(None, description="Filter by condition"),
     category_name: Optional[str] = Query(None, description="Filter by category name"),
+    status: Optional[ItemStatus] = Query(None, description="Filter by status (default: only active items)"),
+    include_all: bool = Query(False, description="Include all items regardless of status"),
 ):
     results = list(items.values())
+
+    # Default: only show active items unless include_all is True or specific status is requested
+    if not include_all:
+        if status is not None:
+            results = [i for i in results if i.status == status]
+        else:
+            # Default to showing only active items
+            results = [i for i in results if i.status == ItemStatus.ACTIVE]
 
     if q is not None:
         ql = q.lower()
