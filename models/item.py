@@ -110,11 +110,39 @@ class ItemUpdate(BaseModel):
     """Partial update for an item."""
     name: str | None = Field(None, min_length=1, max_length=200, description="Update name.")
     description: str | None = Field(None, min_length=1, max_length=2000, description="Update description.")
-    status: ItemStatus = Field(description="Status of the item.")
+    status: ItemStatus | None = Field(None, description="Status of the item.")  # <-- make this optional
     condition: ItemCondition | None = Field(None, description="Update condition.")
-    price: Decimal | None = Field(None, ge=Decimal("0.01"), le=Decimal("999999.99"), decimal_places=2, description="Update price.")
+    price: Decimal | None = Field(
+        None,
+        ge=Decimal("0.01"),
+        le=Decimal("999999.99"),
+        decimal_places=2,
+        description="Update price.",
+    )
     category: CategoryRead | None = Field(None, description="Update category.")
     media: List[MediaRead] | None = Field(None, max_length=10, description="Update media list.")
+
+
+class ItemLinks(BaseModel):
+    self: str = Field(
+        ...,
+        description="Relative link to this item resource.",
+        json_schema_extra={"example": "/items/99999999-9999-4999-8999-999999999999"},
+    )
+    category: str | None = Field(
+        None,
+        description="Relative link to this item's category.",
+        json_schema_extra={"example": "/categories/550e8400-e29b-41d4-a716-446655440000"},
+    )
+    media: List[str] | None = Field(
+        None,
+        description="Relative links to this item's media resources.",
+        json_schema_extra={
+            "example": [
+                "/media/11111111-2222-3333-4444-555555555555"
+            ]
+        },
+    )
 
 
 class ItemRead(ItemBase):
@@ -133,4 +161,8 @@ class ItemRead(ItemBase):
         default_factory=datetime.utcnow,
         description="Last update timestamp (UTC).",
         json_schema_extra={"example": "2025-01-16T12:00:00Z"},
+    )
+    links: ItemLinks | None = Field(
+        None,
+        description="Hypermedia links related to this item.",
     )
