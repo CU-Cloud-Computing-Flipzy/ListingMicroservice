@@ -8,22 +8,32 @@ from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 from enum import Enum
 
-from fastapi import FastAPI, HTTPException, Query, Response, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Response, Request, BackgroundTasks, Depends
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import or_
 
 from models.category import CategoryCreate, CategoryRead, CategoryUpdate
-from models.media import MediaCreate, MediaRead, MediaUpdate
-from models.item import ItemCreate, ItemRead, ItemUpdate, ItemCondition, ItemStatus, ItemLinks
+from models.media import MediaCreate, MediaRead, MediaUpdate, MediaType
+from models.item import (
+    ItemCreate,
+    ItemRead,
+    ItemUpdate,
+    ItemCondition,
+    ItemStatus,
+    ItemLinks,
+)
+
+from db import (
+    get_db,
+    init_db,
+    SessionLocal,
+    CategoryORM,
+    MediaORM,
+    ItemORM,
+)
 
 port = int(os.environ.get("FASTAPIPORT", 8000))
-
-# -----------------------------------------------------------------------------
-# In-memory "databases"
-# -----------------------------------------------------------------------------
-categories: Dict[UUID, CategoryRead] = {}
-media_store: Dict[UUID, MediaRead] = {}
-items: Dict[UUID, ItemRead] = {}
-jobs: Dict[UUID, "Job"] = {}  # background jobs for async operations
 
 
 # -----------------------------------------------------------------------------
@@ -40,55 +50,64 @@ class Job(BaseModel):
     id: UUID = Field(..., description="Job ID.")
     item_id: UUID = Field(..., description="ID of the related item.")
     status: JobStatus = Field(..., description="Current status of the job.")
-    created_at: datetime = Field(..., description="When the job was created (UTC).")
+    created_at: datetime = Field(..., description="Creation time of the job (UTC).")
     updated_at: datetime = Field(..., description="Last update time of the job (UTC).")
     result_message: Optional[str] = Field(
         None,
         description="Optional human-readable result or error message.",
     )
 
+
+# In-memory job storage
+jobs: Dict[UUID, Job] = {}
+
+
 # -----------------------------------------------------------------------------
-# Async job worker
+# Async job worker: operates on Item records stored in DB
 # -----------------------------------------------------------------------------
 def run_publish_job(job_id: UUID) -> None:
     """
     Background task: simulate publishing an item.
-    Updates the item's status and the job's status.
+    Updates the item's status in the DB and the job's status.
     """
     job = jobs.get(job_id)
     if not job:
         return
 
-    # Mark job as in progress
+    # 1. Mark job as in progress
     job.status = JobStatus.IN_PROGRESS
     job.updated_at = datetime.utcnow()
     jobs[job_id] = job
 
-    # Simulate some work
+    # 2. Simulate some work
     time.sleep(2)
 
-    item = items.get(job.item_id)
-    if not item:
-        job.status = JobStatus.FAILED
-        job.result_message = "Item no longer exists."
+    db = SessionLocal()
+    try:
+        db_item = db.query(ItemORM).filter(ItemORM.id == str(job.item_id)).first()
+        if not db_item:
+            job.status = JobStatus.FAILED
+            job.result_message = "Item no longer exists."
+            job.updated_at = datetime.utcnow()
+            jobs[job_id] = job
+            return
+
+        # Update item status in DB
+        db_item.status = ItemStatus.ACTIVE.value
+        db_item.updated_at = datetime.utcnow()
+        db.commit()
+
+        # Update job status
+        job.status = JobStatus.COMPLETED
+        job.result_message = "Item published successfully."
         job.updated_at = datetime.utcnow()
         jobs[job_id] = job
-        return
-
-    # "Publish" the item: mark as ACTIVE and update timestamp
-    item.status = ItemStatus.ACTIVE
-    item.updated_at = datetime.utcnow()
-    items[item.id] = item
-
-    # Mark job as completed
-    job.status = JobStatus.COMPLETED
-    job.result_message = "Item published successfully."
-    job.updated_at = datetime.utcnow()
-    jobs[job_id] = job
+    finally:
+        db.close()
 
 
 # -----------------------------------------------------------------------------
-# App
+# FastAPI app
 # -----------------------------------------------------------------------------
 app = FastAPI(
     title="Listing API",
@@ -96,13 +115,91 @@ app = FastAPI(
     version="0.1.0",
 )
 
+
+@app.on_event("startup")
+def on_startup() -> None:
+    # Ensure database tables exist at startup
+    init_db()
+
+
+# -----------------------------------------------------------------------------
+# ORM → Pydantic mapping helpers
+# -----------------------------------------------------------------------------
+def category_to_read(cat: CategoryORM) -> CategoryRead:
+    return CategoryRead(
+        id=UUID(cat.id),
+        name=cat.name,
+        description=cat.description,
+        created_at=cat.created_at,
+        updated_at=cat.updated_at,
+    )
+
+
+def media_to_read(media: MediaORM) -> MediaRead:
+    return MediaRead(
+        id=UUID(media.id),
+        url=media.url,
+        type=MediaType(media.type),
+        alt_text=media.alt_text,
+        is_primary=media.is_primary,
+        created_at=media.created_at,
+        updated_at=media.updated_at,
+    )
+
+
+def item_to_read(item: ItemORM) -> ItemRead:
+    category = category_to_read(item.category) if item.category else None
+    media_list = [media_to_read(m) for m in item.media]
+    return ItemRead(
+        id=UUID(item.id),
+        name=item.name,
+        description=item.description,
+        status=ItemStatus(item.status),
+        condition=ItemCondition(item.condition),
+        price=item.price,
+        category=category,
+        media=media_list,
+        created_at=item.created_at,
+        updated_at=item.updated_at,
+        links=None,  # Filled later by set_item_links()
+    )
+
+
+# -----------------------------------------------------------------------------
+# Link & ETag helpers
+# -----------------------------------------------------------------------------
+def set_item_links(item: ItemRead) -> None:
+    """
+    Populate the `links` field on an ItemRead with relative URLs.
+    """
+    item.links = ItemLinks(
+        self=f"/items/{item.id}",
+        category=f"/categories/{item.category.id}" if item.category else None,
+        media=[f"/media/{m.id}" for m in item.media] if item.media else [],
+    )
+
+
+def generate_item_etag(item: ItemRead) -> str:
+    """
+    Generate a strong ETag based on item ID and updated_at timestamp.
+    """
+    raw = f"{item.id}:{item.updated_at.isoformat()}".encode("utf-8")
+    return '"' + hashlib.sha256(raw).hexdigest() + '"'
+
+
 # -----------------------------------------------------------------------------
 # Category endpoints
 # -----------------------------------------------------------------------------
 @app.post("/categories", response_model=CategoryRead, status_code=201)
-def create_category(payload: CategoryCreate, response: Response):
-    cat = CategoryRead(**payload.model_dump())
-    categories[cat.id] = cat
+def create_category(payload: CategoryCreate, response: Response, db: Session = Depends(get_db)):
+    db_cat = CategoryORM(
+        name=payload.name,
+        description=payload.description,
+    )
+    db.add(db_cat)
+    db.commit()
+    db.refresh(db_cat)
+    cat = category_to_read(db_cat)
     response.headers["Location"] = f"/categories/{cat.id}"
     return cat
 
@@ -111,55 +208,88 @@ def create_category(payload: CategoryCreate, response: Response):
 def list_categories(
     name: Optional[str] = Query(None, description="Filter by category name"),
     q: Optional[str] = Query(None, description="Search in name/description"),
+    db: Session = Depends(get_db),
 ):
-    results = list(categories.values())
+    query = db.query(CategoryORM)
     if name is not None:
-        results = [c for c in results if c.name == name]
+        query = query.filter(CategoryORM.name == name)
     if q is not None:
-        ql = q.lower()
-        results = [c for c in results if ql in c.name.lower() or ql in c.description.lower()]
-    return results
+        pattern = f"%{q}%"
+        query = query.filter(
+            or_(
+                CategoryORM.name.ilike(pattern),
+                CategoryORM.description.ilike(pattern),
+            )
+        )
+    cats = query.all()
+    return [category_to_read(c) for c in cats]
 
 
 @app.get("/categories/{category_id}", response_model=CategoryRead)
-def get_category(category_id: UUID):
-    if category_id not in categories:
+def get_category(category_id: UUID, db: Session = Depends(get_db)):
+    db_cat = db.query(CategoryORM).filter(CategoryORM.id == str(category_id)).first()
+    if db_cat is None:
         raise HTTPException(status_code=404, detail="Category not found")
-    return categories[category_id]
+    return category_to_read(db_cat)
 
 
 @app.patch("/categories/{category_id}", response_model=CategoryRead)
-def update_category(category_id: UUID, update: CategoryUpdate):
-    if category_id not in categories:
+def update_category(category_id: UUID, update: CategoryUpdate, db: Session = Depends(get_db)):
+    db_cat = db.query(CategoryORM).filter(CategoryORM.id == str(category_id)).first()
+    if db_cat is None:
         raise HTTPException(status_code=404, detail="Category not found")
-    stored = categories[category_id].model_dump()
-    stored.update(update.model_dump(exclude_unset=True))
-    stored["updated_at"] = datetime.utcnow()
-    categories[category_id] = CategoryRead(**stored)
-    return categories[category_id]
+
+    data = update.model_dump(exclude_unset=True)
+    if "name" in data:
+        db_cat.name = update.name
+    if "description" in data:
+        db_cat.description = update.description
+    db_cat.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(db_cat)
+    return category_to_read(db_cat)
 
 
 @app.delete("/categories/{category_id}", status_code=204)
-def delete_category(category_id: UUID):
-    if category_id not in categories:
+def delete_category(category_id: UUID, db: Session = Depends(get_db)):
+    db_cat = db.query(CategoryORM).filter(CategoryORM.id == str(category_id)).first()
+    if db_cat is None:
         raise HTTPException(status_code=404, detail="Category not found")
-    # Prevent deleting a category that items are using
-    in_use = any(it.category.id == category_id for it in items.values())
+
+    # Prevent deletion if it is still referenced by items
+    in_use = (
+        db.query(ItemORM)
+        .filter(ItemORM.category_id == db_cat.id)
+        .first()
+        is not None
+    )
     if in_use:
         raise HTTPException(
             status_code=400,
             detail="Category is referenced by one or more items; delete or update those items first.",
         )
-    del categories[category_id]
+
+    db.delete(db_cat)
+    db.commit()
     return None
+
 
 # -----------------------------------------------------------------------------
 # Media endpoints
 # -----------------------------------------------------------------------------
 @app.post("/media", response_model=MediaRead, status_code=201)
-def create_media(payload: MediaCreate, response: Response):
-    m = MediaRead(**payload.model_dump())
-    media_store[m.id] = m
+def create_media(payload: MediaCreate, response: Response, db: Session = Depends(get_db)):
+    db_media = MediaORM(
+        url=str(payload.url),
+        type=payload.type.value,
+        alt_text=payload.alt_text,
+        is_primary=payload.is_primary,
+    )
+    db.add(db_media)
+    db.commit()
+    db.refresh(db_media)
+    m = media_to_read(db_media)
     response.headers["Location"] = f"/media/{m.id}"
     return m
 
@@ -168,46 +298,64 @@ def create_media(payload: MediaCreate, response: Response):
 def list_media(
     type: Optional[str] = Query(None, description='Filter by "image" or "video"'),
     is_primary: Optional[bool] = Query(None, description="Filter by primary flag"),
+    db: Session = Depends(get_db),
 ):
-    results = list(media_store.values())
+    query = db.query(MediaORM)
     if type is not None:
-        results = [m for m in results if m.type.value == type]
+        query = query.filter(MediaORM.type == type)
     if is_primary is not None:
-        results = [m for m in results if m.is_primary == is_primary]
-    return results
+        query = query.filter(MediaORM.is_primary == is_primary)
+    media = query.all()
+    return [media_to_read(m) for m in media]
 
 
 @app.get("/media/{media_id}", response_model=MediaRead)
-def get_media(media_id: UUID):
-    if media_id not in media_store:
+def get_media(media_id: UUID, db: Session = Depends(get_db)):
+    db_media = db.query(MediaORM).filter(MediaORM.id == str(media_id)).first()
+    if db_media is None:
         raise HTTPException(status_code=404, detail="Media not found")
-    return media_store[media_id]
+    return media_to_read(db_media)
 
 
 @app.patch("/media/{media_id}", response_model=MediaRead)
-def update_media(media_id: UUID, update: MediaUpdate):
-    if media_id not in media_store:
+def update_media(media_id: UUID, update: MediaUpdate, db: Session = Depends(get_db)):
+    db_media = db.query(MediaORM).filter(MediaORM.id == str(media_id)).first()
+    if db_media is None:
         raise HTTPException(status_code=404, detail="Media not found")
-    stored = media_store[media_id].model_dump()
-    stored.update(update.model_dump(exclude_unset=True))
-    stored["updated_at"] = datetime.utcnow()
-    media_store[media_id] = MediaRead(**stored)
-    return media_store[media_id]
+
+    data = update.model_dump(exclude_unset=True)
+    if "url" in data and update.url is not None:
+        db_media.url = str(update.url)
+    if "type" in data and update.type is not None:
+        db_media.type = update.type.value
+    if "alt_text" in data:
+        db_media.alt_text = update.alt_text
+    if "is_primary" in data and update.is_primary is not None:
+        db_media.is_primary = update.is_primary
+
+    db_media.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(db_media)
+    return media_to_read(db_media)
 
 
 @app.delete("/media/{media_id}", status_code=204)
-def delete_media(media_id: UUID):
-    if media_id not in media_store:
+def delete_media(media_id: UUID, db: Session = Depends(get_db)):
+    db_media = db.query(MediaORM).filter(MediaORM.id == str(media_id)).first()
+    if db_media is None:
         raise HTTPException(status_code=404, detail="Media not found")
-    # Prevent deleting media that any item still references
-    in_use = any(any(m.id == media_id for m in it.media) for it in items.values())
-    if in_use:
+
+    # Prevent deletion if it is referenced by items
+    if db_media.items:
         raise HTTPException(
             status_code=400,
             detail="Media is referenced by one or more items; delete or update those items first.",
         )
-    del media_store[media_id]
+
+    db.delete(db_media)
+    db.commit()
     return None
+
 
 # -----------------------------------------------------------------------------
 # Item endpoints
@@ -234,10 +382,44 @@ def generate_item_etag(item: ItemRead) -> str:
 
 
 @app.post("/items", response_model=ItemRead, status_code=201)
-def create_item(payload: ItemCreate, response: Response):
-    item = ItemRead(**payload.model_dump())
+def create_item(payload: ItemCreate, response: Response, db: Session = Depends(get_db)):
+    # Validate that category exists
+    category_id = str(payload.category.id)
+    db_cat = db.query(CategoryORM).filter(CategoryORM.id == category_id).first()
+    if db_cat is None:
+        raise HTTPException(status_code=400, detail="Category does not exist")
+
+    # Validate that media exist
+    media_objs: List[MediaORM] = []
+    for m in payload.media:
+        db_media = db.query(MediaORM).filter(MediaORM.id == str(m.id)).first()
+        if db_media is None:
+            raise HTTPException(status_code=400, detail=f"Media with id {m.id} does not exist")
+        media_objs.append(db_media)
+
+    db_item = ItemORM(
+        name=payload.name,
+        description=payload.description,
+        status=payload.status.value,
+        condition=payload.condition.value,
+        price=payload.price,
+        category_id=category_id,
+    )
+    db_item.media = media_objs
+
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+
+    db_item = (
+        db.query(ItemORM)
+        .options(joinedload(ItemORM.category), joinedload(ItemORM.media))
+        .filter(ItemORM.id == db_item.id)
+        .first()
+    )
+
+    item = item_to_read(db_item)
     set_item_links(item)
-    items[item.id] = item
     response.headers["Location"] = f"/items/{item.id}"
     return item
 
@@ -247,48 +429,67 @@ def list_items(
     q: Optional[str] = Query(None, description="Search in name or description"),
     condition: Optional[ItemCondition] = Query(None, description="Filter by condition"),
     category_name: Optional[str] = Query(None, description="Filter by category name"),
-    status: Optional[ItemStatus] = Query(None, description="Filter by status (default: only active items)"),
+    status: Optional[ItemStatus] = Query(None, description="Filter by item status"),
     include_all: bool = Query(False, description="Include all items regardless of status"),
     page: int = Query(1, ge=1, description="Page number (starting from 1)"),
     page_size: int = Query(10, ge=1, le=100, description="Number of items per page"),
+    db: Session = Depends(get_db),
 ):
-    results = list(items.values())
+    query = (
+        db.query(ItemORM)
+        .options(joinedload(ItemORM.category), joinedload(ItemORM.media))
+    )
 
-    # Default: only show active items unless include_all is True or specific status is requested
+    # By default return only ACTIVE items unless include_all=True
     if not include_all:
         if status is not None:
-            results = [i for i in results if i.status == status]
+            query = query.filter(ItemORM.status == status.value)
         else:
-            # Default to showing only active items
-            results = [i for i in results if i.status == ItemStatus.ACTIVE]
+            query = query.filter(ItemORM.status == ItemStatus.ACTIVE.value)
+    elif status is not None:
+        query = query.filter(ItemORM.status == status.value)
 
     if q is not None:
-        ql = q.lower()
-        results = [i for i in results if ql in i.name.lower() or ql in i.description.lower()]
+        pattern = f"%{q}%"
+        query = query.filter(
+            or_(
+                ItemORM.name.ilike(pattern),
+                ItemORM.description.ilike(pattern),
+            )
+        )
 
     if condition is not None:
-        results = [i for i in results if i.condition == condition]
+        query = query.filter(ItemORM.condition == condition.value)
 
     if category_name is not None:
-        results = [i for i in results if i.category.name == category_name]
+        query = query.join(ItemORM.category).filter(CategoryORM.name == category_name)
 
-    # --- Pagination ---
-    start = (page - 1) * page_size
-    end = start + page_size
-    paged_results = results[start:end]
+    # Pagination
+    total = query.count()
+    offset = (page - 1) * page_size
+    db_items = query.offset(offset).limit(page_size).all()
 
-    for item in paged_results:
+    result: List[ItemRead] = []
+    for db_item in db_items:
+        item = item_to_read(db_item)
         set_item_links(item)
+        result.append(item)
 
-    return paged_results
+    return result
 
 
 @app.get("/items/{item_id}", response_model=ItemRead)
-def get_item(item_id: UUID, request: Request, response: Response):
-    if item_id not in items:
+def get_item(item_id: UUID, request: Request, response: Response, db: Session = Depends(get_db)):
+    db_item = (
+        db.query(ItemORM)
+        .options(joinedload(ItemORM.category), joinedload(ItemORM.media))
+        .filter(ItemORM.id == str(item_id))
+        .first()
+    )
+    if db_item is None:
         raise HTTPException(status_code=404, detail="Item not found")
 
-    item = items[item_id]
+    item = item_to_read(db_item)
     set_item_links(item)
     etag = generate_item_etag(item)
 
@@ -301,22 +502,73 @@ def get_item(item_id: UUID, request: Request, response: Response):
 
 
 @app.patch("/items/{item_id}", response_model=ItemRead)
-def update_item(item_id: UUID, update: ItemUpdate):
-    if item_id not in items:
+def update_item(item_id: UUID, update: ItemUpdate, db: Session = Depends(get_db)):
+    db_item = (
+        db.query(ItemORM)
+        .options(joinedload(ItemORM.category), joinedload(ItemORM.media))
+        .filter(ItemORM.id == str(item_id))
+        .first()
+    )
+    if db_item is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    stored = items[item_id].model_dump()
-    stored.update(update.model_dump(exclude_unset=True))
-    stored["updated_at"] = datetime.utcnow()
-    items[item_id] = ItemRead(**stored)
-    set_item_links(items[item_id])
-    return items[item_id]
+
+    data = update.model_dump(exclude_unset=True)
+
+    if "name" in data and update.name is not None:
+        db_item.name = update.name
+    if "description" in data and update.description is not None:
+        db_item.description = update.description
+    if "status" in data and update.status is not None:
+        db_item.status = update.status.value
+    if "condition" in data and update.condition is not None:
+        db_item.condition = update.condition.value
+    if "price" in data and update.price is not None:
+        db_item.price = update.price
+
+    if "category" in data and update.category is not None:
+        new_cat_id = str(update.category.id)
+        db_cat = db.query(CategoryORM).filter(CategoryORM.id == new_cat_id).first()
+        if db_cat is None:
+            raise HTTPException(status_code=400, detail="New category does not exist")
+        db_item.category_id = new_cat_id
+
+    if "media" in data:
+        new_media_objs: List[MediaORM] = []
+        if update.media is not None:
+            for m in update.media:
+                db_media = db.query(MediaORM).filter(MediaORM.id == str(m.id)).first()
+                if db_media is None:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Media with id {m.id} does not exist",
+                    )
+                new_media_objs.append(db_media)
+        db_item.media = new_media_objs
+
+    db_item.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(db_item)
+
+    db_item = (
+        db.query(ItemORM)
+        .options(joinedload(ItemORM.category), joinedload(ItemORM.media))
+        .filter(ItemORM.id == db_item.id)
+        .first()
+    )
+
+    item = item_to_read(db_item)
+    set_item_links(item)
+    return item
 
 
 @app.delete("/items/{item_id}", status_code=204)
-def delete_item(item_id: UUID):
-    if item_id not in items:
+def delete_item(item_id: UUID, db: Session = Depends(get_db)):
+    db_item = db.query(ItemORM).filter(ItemORM.id == str(item_id)).first()
+    if db_item is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    del items[item_id]
+
+    db.delete(db_item)
+    db.commit()
     return None
 
 
@@ -325,13 +577,14 @@ def publish_item(
     item_id: UUID,
     background_tasks: BackgroundTasks,
     response: Response,
+    db: Session = Depends(get_db),
 ):
     """
     Asynchronously publish an item.
-
     Returns 202 Accepted and a Job resource that can be polled for status.
     """
-    if item_id not in items:
+    db_item = db.query(ItemORM).filter(ItemORM.id == str(item_id)).first()
+    if db_item is None:
         raise HTTPException(status_code=404, detail="Item not found")
 
     now = datetime.utcnow()
@@ -345,10 +598,10 @@ def publish_item(
     )
     jobs[job.id] = job
 
-    # Schedule the background task
+    # Schedule background task
     background_tasks.add_task(run_publish_job, job.id)
 
-    # Location of the job resource for polling
+    # Location header for polling job
     response.headers["Location"] = f"/jobs/{job.id}"
     return job
 
@@ -365,14 +618,14 @@ def get_job(job_id: UUID):
 
 
 # -----------------------------------------------------------------------------
-# Root
+# Root endpoint
 # -----------------------------------------------------------------------------
 @app.get("/")
 def root():
     return {"message": "Welcome to the Listing API. See /docs for OpenAPI UI."}
 
 # -----------------------------------------------------------------------------
-# Entrypoint
+# Entrypoint (for local development)
 # -----------------------------------------------------------------------------
 if __name__ == "__main__":
     import uvicorn
