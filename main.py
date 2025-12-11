@@ -391,11 +391,19 @@ def create_item(payload: ItemCreate, response: Response, db: Session = Depends(g
 
     # Validate that media exist
     media_objs: List[MediaORM] = []
-    for m in payload.media:
-        db_media = db.query(MediaORM).filter(MediaORM.id == str(m.id)).first()
-        if db_media is None:
-            raise HTTPException(status_code=400, detail=f"Media with id {m.id} does not exist")
-        media_objs.append(db_media)
+    if payload.media:
+        for m in payload.media:
+            db_media = (
+                db.query(MediaORM)
+                .filter(MediaORM.id == str(m.id))
+                .first()
+            )
+            if db_media is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Media with id {m.id} does not exist"
+                )
+            media_objs.append(db_media)
 
     db_item = ItemORM(
         name=payload.name,

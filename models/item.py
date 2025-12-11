@@ -20,10 +20,24 @@ class ItemCondition(str, Enum):
     USED = "used"
     REFURBISHED = "refurbished"
 
+
 class ItemStatus(str, Enum):
     ACTIVE = "active"
     HIDDEN = "hidden"
     SOLD = "sold"
+
+
+# =========================
+# Ref models
+# =========================
+
+class CategoryRef(BaseModel):
+    id: UUID
+
+
+class MediaRef(BaseModel):
+    id: UUID
+
 
 class ItemBase(BaseModel):
     name: str = Field(
@@ -101,16 +115,33 @@ class ItemBase(BaseModel):
     }
 
 
-class ItemCreate(ItemBase):
-    """Payload for creating a new item."""
-    pass
+# =========================
+# Create
+# =========================
 
+class ItemCreate(BaseModel):
+    """Payload for creating a new item."""
+
+    name: str
+    description: str
+    status: ItemStatus = ItemStatus.ACTIVE
+    condition: ItemCondition = ItemCondition.NEW
+    price: Decimal
+
+    category: CategoryRef
+    media: List[MediaRef] | None = None
+
+
+# =========================
+# Update
+# =========================
 
 class ItemUpdate(BaseModel):
     """Partial update for an item."""
+
     name: str | None = Field(None, min_length=1, max_length=200, description="Update name.")
     description: str | None = Field(None, min_length=1, max_length=2000, description="Update description.")
-    status: ItemStatus | None = Field(None, description="Status of the item.")  # <-- make this optional
+    status: ItemStatus | None = Field(None, description="Status of the item.")
     condition: ItemCondition | None = Field(None, description="Update condition.")
     price: Decimal | None = Field(
         None,
@@ -119,8 +150,9 @@ class ItemUpdate(BaseModel):
         decimal_places=2,
         description="Update price.",
     )
-    category: CategoryRead | None = Field(None, description="Update category.")
-    media: List[MediaRead] | None = Field(None, max_length=10, description="Update media list.")
+
+    category: CategoryRef | None = Field(None, description="Update category.")
+    media: List[MediaRef] | None = Field(None, max_length=10, description="Update media list.")
 
 
 class ItemLinks(BaseModel):
@@ -147,6 +179,7 @@ class ItemLinks(BaseModel):
 
 class ItemRead(ItemBase):
     """Representation returned to clients."""
+
     id: UUID = Field(
         default_factory=uuid4,
         description="Server-generated item ID.",
