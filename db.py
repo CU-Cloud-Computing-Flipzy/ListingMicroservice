@@ -101,6 +101,10 @@ class ItemORM(Base):
 
     category_id = Column(String(36), ForeignKey("categories.id"), nullable=False)
 
+    # --- THIS WAS THE MISSING PIECE ---
+    owner_user_id = Column(String(36), nullable=False)
+    # ----------------------------------
+
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
