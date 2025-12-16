@@ -152,6 +152,7 @@ def item_to_read(item: ItemORM) -> ItemRead:
     media_list = [media_to_read(m) for m in item.media]
     return ItemRead(
         id=UUID(item.id),
+        owner_user_id=UUID(item.owner_user_id),
         name=item.name,
         description=item.description,
         status=ItemStatus(item.status),
@@ -161,7 +162,7 @@ def item_to_read(item: ItemORM) -> ItemRead:
         media=media_list,
         created_at=item.created_at,
         updated_at=item.updated_at,
-        links=None,  # Filled later by set_item_links()
+        links=None,
     )
 
 
@@ -412,6 +413,7 @@ def create_item(payload: ItemCreate, response: Response, db: Session = Depends(g
         condition=payload.condition.value,
         price=payload.price,
         category_id=category_id,
+        owner_user_id=str(payload.owner_user_id),
     )
     db_item.media = media_objs
 

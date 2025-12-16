@@ -39,7 +39,17 @@ class MediaRef(BaseModel):
     id: UUID
 
 
+# =========================
+# Base
+# =========================
+
 class ItemBase(BaseModel):
+    owner_user_id: UUID = Field(
+        ...,
+        description="ID of the user who created/owns this item (logical foreign key to user-service).",
+        json_schema_extra={"example": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+    )
+
     name: str = Field(
         ...,
         min_length=1,
@@ -86,6 +96,7 @@ class ItemBase(BaseModel):
         "json_schema_extra": {
             "examples": [
                 {
+                    "owner_user_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
                     "name": "Wireless Mouse",
                     "description": "Ergonomic wireless mouse with 2.4GHz USB receiver.",
                     "condition": "new",
@@ -121,7 +132,7 @@ class ItemBase(BaseModel):
 
 class ItemCreate(BaseModel):
     """Payload for creating a new item."""
-
+    owner_user_id: UUID
     name: str
     description: str
     status: ItemStatus = ItemStatus.ACTIVE
@@ -155,6 +166,10 @@ class ItemUpdate(BaseModel):
     media: List[MediaRef] | None = Field(None, max_length=10, description="Update media list.")
 
 
+# =========================
+# Links
+# =========================
+
 class ItemLinks(BaseModel):
     self: str = Field(
         ...,
@@ -176,6 +191,10 @@ class ItemLinks(BaseModel):
         },
     )
 
+
+# =========================
+# Read
+# =========================
 
 class ItemRead(ItemBase):
     """Representation returned to clients."""
